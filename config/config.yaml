@@ -1,0 +1,153 @@
+# =====================================================================
+# NIFTY Options Bot — all tunables. No magic numbers in code.
+# mode: paper | live    (live execution is NOT implemented in Phase 1)
+# simulate_feed: true -> no token needed; simulated ticks + chain.
+# =====================================================================
+
+mode: paper
+simulate_feed: false          # false = use live Upstox data feed (recording + paper trading on real ticks)
+
+timezone: Asia/Kolkata
+
+session:
+  market_open: "09:15"
+  market_close: "15:30"
+  no_new_entry_after: "14:30"
+  hard_squareoff: "15:00"
+  expiry_squareoff: "14:30"   # on expiry day, exit earlier
+
+instrument:
+  underlying_symbol: "NIFTY"
+  underlying_key: "NSE_INDEX|Nifty 50"      # Upstox instrument_key for spot
+  vix_key: "NSE_INDEX|India VIX"
+  exchange: "NSE_FO"
+  lot_size: 75                # live mode overrides from contract master
+  strike_step: 50
+  # If > 0, force the weekly expiry weekday for sim only (0=Mon..6=Sun).
+  # Real expiry is always derived from the contract list in live mode.
+  sim_force_expiry_weekday: 1   # Tuesday, for condor testing in sim
+
+capital:
+  total: 500000
+  max_risk_per_trade_pct: 1.0     # % of capital at risk per trade
+  daily_max_loss_pct: 3.0         # halt bot for the day at this loss
+  daily_profit_target_pct: 0.0    # 0 = disabled
+  max_open_positions: 1
+  max_trades_per_day: 4
+
+# ---- Regime engine ----
+regime:
+  adx_period: 14
+  adx_trend_min: 22           # ADX above this => trending
+  adx_slope_lookback: 3
+  chop_period: 14
+  chop_trend_max: 38.2        # Choppiness below this => trending
+  chop_range_min: 61.8        # Choppiness above this => ranging
+  vix_spike_pct: 12.0         # India VIX above this = risk-off, favour flat/condor caution
+  confirmations_required: 2   # N consecutive agreeing votes before regime switch
+  min_dwell_bars: 2           # must hold a regime at least this many 15m bars
+  confidence_min: 0.55        # below this => FLAT
+
+iv_rank:
+  source: "vix_percentile"    # vix_percentile (v1) | chain_iv (v2 once we have history)
+  lookback_days: 250
+  high_threshold: 50.0        # IV rank >= this => "high IV" branch
+
+# ---- Strategy knobs ----
+strategy:
+  timeframe_bias_min: 15
+  timeframe_entry_min: 5
+  breakout_lookback_bars: 6   # 5m bars for breakout high/low
+
+  iron_condor:
+    short_delta_target: 0.18      # ~0.15-0.20
+    wing_width_points: 100        # distance short->long strike
+    take_profit_pct: 0.50         # close at 50% of credit captured
+    stop_loss_mult: 1.75          # stop at 1.75x credit
+    min_credit_points: 20         # skip if credit too small
+    max_vix_to_enter: 16.0        # don't open condor if VIX above this
+    fallback_short_offset_steps: 5 # strikes from ATM when live delta unavailable
+
+  debit_spread:
+    long_offset_steps: 0          # buy ~ATM (0 steps from ATM)
+    short_offset_steps: 2         # sell ~OTM (2 strike steps away)
+    take_profit_pct: 0.60         # 60% of max profit
+    stop_loss_pct: 0.40           # 40% of debit paid
+
+  credit_spread:
+    short_delta_target: 0.25
+    wing_width_points: 50
+    take_profit_pct: 0.50
+    stop_loss_mult: 1.75
+    fallback_short_offset_steps: 3 # strikes from ATM when live delta unavailable
+
+# ---- Risk / cost model ----
+costs:
+  slippage_points_per_leg: 1.0    # pessimistic paper fill assumption
+  brokerage_per_order: 20.0       # flat per order leg
+  stt_pct_sell_premium: 0.0625    # % on sell-side premium (options)
+  exchange_txn_pct: 0.0503        # % of premium turnover
+  gst_pct: 18.0                   # % on (brokerage + txn charges)
+  sebi_per_crore: 10.0
+  stamp_pct_buy: 0.003            # % on buy-side
+
+calendar:
+  holidays: []                    # ["2026-01-26", ...] (NSE holidays)
+  event_blackout_dates: []        # Budget / RBI policy — no new entries
+
+# ---- Data recorder ----
+recorder:
+  enabled: true                   # master switch; false = recorder never persists
+  collect_on_start: false         # tick/chain collection starts OFF; toggle on from
+                                  # the dashboard (or record_on command). Candles,
+                                  # regime log and the journal always record.
+  chain_snapshot_interval_sec: 5
+  strikes_each_side: 15           # full chain window recorded around ATM
+  tick_strikes_each_side: 5       # option-leg ticks recorded (keeps row count sane)
+  batch_flush_rows: 2000
+  batch_flush_ms: 500
+  queue_maxsize: 100000
+  record_future: true             # also record near-month future for volume/OI
+
+# ---- Candle warm-up ----
+warmup:
+  enabled: true
+  bias_bars_needed: 30            # 15m bars needed before regime is trusted
+  source: "auto"                  # auto: own db -> upstox history -> sim-generate
+
+# ---- Storage ----
+storage:
+  backend: "sqlite"
+  db_dir: "data/db"
+  parquet_dir: "data/parquet"
+  state_dir: "data/state"
+  log_dir: "data/logs"
+  wal: true
+
+# ---- Simulation (simulate_feed: true) ----
+sim:
+  speed_factor: 60               # 60x => full session in ~6 min
+  tick_interval_ms: 250          # wall-clock ms between emitted sim ticks
+  start_spot: 24000.0
+  base_iv: 0.14                  # 14% ATM IV baseline
+  risk_free_rate: 0.065
+  seed: 42
+  warmup_days: 3                 # synthetic prior days for indicator warm-up
+  iv_rank_value: 55              # sim IV-rank; >= iv_rank.high_threshold exercises credit path
+
+# ---- Command API (FastAPI) ----
+api:
+  host: "127.0.0.1"
+  port: 8081
+
+# ---- UI (NiceGUI) ----
+ui:
+  host: "127.0.0.1"
+  port: 8080
+  refresh_interval_sec: 2
+  engine_state_url: "http://127.0.0.1:8081/state"
+  command_url: "http://127.0.0.1:8081/command"
+
+# ---- Notifier ----
+notify:
+  backend: "auto"                # auto -> telegram if token else console
