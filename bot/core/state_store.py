@@ -38,6 +38,8 @@ class StateStore:
                          "queue_depth": 0, "db_file": None, "collecting": False},
             "last_signal": None,
             "journal_tail": [],    # recent journal lines
+            "trades": [],          # closed trades today (table on the dashboard)
+            "config": {},          # user-editable settings (capital, lot, risk)
             "warnings": [],
         }
 
@@ -65,6 +67,13 @@ class StateStore:
             tail = self._state["journal_tail"]
             tail.append(line)
             del tail[:-keep]
+            self._state["updated_ms"] = int(time.time() * 1000)
+
+    def push_trade(self, trade: dict, keep: int = 100) -> None:
+        with self._lock:
+            trades = self._state["trades"]
+            trades.append(trade)
+            del trades[:-keep]
             self._state["updated_ms"] = int(time.time() * 1000)
 
     def snapshot(self) -> dict[str, Any]:

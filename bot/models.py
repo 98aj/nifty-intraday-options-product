@@ -31,6 +31,7 @@ class EngineStatus(str, Enum):
     HALTED = "HALTED"        # daily loss/profit halt, or kill
     SQUARED_OFF = "SQUARED_OFF"
     STOPPED = "STOPPED"
+    WAITING = "WAITING"      # live supervisor idle: market closed, awaiting open
 
 
 class StrategyKind(str, Enum):

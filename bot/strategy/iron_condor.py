@@ -46,7 +46,7 @@ class IronCondor(Strategy):
         if credit_pts < c.min_credit_points:
             return None
 
-        qty = ctx.lot_size
+        qty = ctx.lot_size * ctx.num_lots
         legs = [
             Leg(long_ce.instrument_key, f"CE{int(long_ce.strike)}", OptionType.CE,
                 long_ce.strike, Side.BUY, qty, entry_price=long_ce.mid),

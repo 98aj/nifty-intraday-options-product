@@ -38,7 +38,7 @@ class CreditSpread(Strategy):
         credit_pts = short_q.mid - long_q.mid
         if credit_pts <= 0:
             return None
-        qty = ctx.lot_size
+        qty = ctx.lot_size * ctx.num_lots
         max_reward = credit_pts * qty
         max_risk = (c.wing_width_points - credit_pts) * qty
         legs = [

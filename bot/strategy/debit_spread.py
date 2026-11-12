@@ -55,7 +55,7 @@ class DebitSpread(Strategy):
         if debit_pts <= 0:
             return None
         width = abs(short_q.strike - long_q.strike)
-        qty = ctx.lot_size
+        qty = ctx.lot_size * ctx.num_lots
         max_risk = debit_pts * qty
         max_reward = (width - debit_pts) * qty
         legs = [

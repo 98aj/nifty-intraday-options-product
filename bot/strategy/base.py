@@ -24,6 +24,7 @@ class StrategyContext:
     vix: float
     iv_rank: float
     lot_size: int
+    num_lots: int = 1              # user-configured lots; leg qty = lot_size * num_lots
 
 
 class Strategy(abc.ABC):

@@ -1,5 +1,10 @@
 # Start the NIFTY bot engine + dashboard (Windows PowerShell).
-# Usage: .\scripts\start.ps1
+# Usage:
+#   .\scripts\start.ps1          # use config.yaml (live/paper as configured)
+#   .\scripts\start.ps1 -Sim     # force simulated feed (no token needed)
+param(
+    [switch]$Sim
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -8,7 +13,8 @@ Set-Location $root
 $py = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) { $py = "python" }
 
-Write-Host "Starting engine + UI using $py ..."
-& $py (Join-Path $root "scripts\run.py") start
-Write-Host "Dashboard: http://127.0.0.1:8080"
-Write-Host "State API: http://127.0.0.1:8081/state"
+$runArgs = @((Join-Path $root "scripts\run.py"), "start")
+if ($Sim) { $runArgs += "--sim" }
+
+Write-Host "Starting engine + dashboard using $py ..."
+& $py $runArgs

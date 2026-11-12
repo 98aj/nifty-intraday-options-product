@@ -17,7 +17,7 @@ from typing import Optional
 from bot.models import OptionType, OrderIntent, Side, StrategyKind
 from bot.risk import costs as cost_model
 from bot.risk.calendar import TradingCalendar
-from bot.risk.sizing import lots_for_trade, vix_scale
+from bot.risk.sizing import vix_scale
 
 
 @dataclass
@@ -106,12 +106,19 @@ class RiskManager:
         if intent.max_risk <= 0:
             return RiskDecision(False, "non-positive max_risk computed")
 
-        lots = lots_for_trade(self.cfg, intent.max_risk, vix)
-        if lots < 1:
+        # Fixed-lots-win: the legs already carry the user's configured lots
+        # (num_lots * lot_size), so intent.max_risk is the TOTAL risk for the
+        # position. We do not resize it; we only block if those lots would
+        # breach the per-trade budget (capital acts as the brake).
+        lots = max(1, int(self.cfg.capital.lots))
+        scale = vix_scale(vix, self.cfg.regime.vix_spike_pct)
+        budget = (self.cfg.capital.total
+                  * self.cfg.capital.max_risk_per_trade_pct / 100.0) * scale
+        if intent.max_risk > budget:
             return RiskDecision(
                 False,
-                f"risk {intent.max_risk:.0f} exceeds per-trade budget "
-                f"(VIX scale {vix_scale(vix, self.cfg.regime.vix_spike_pct):.2f})")
+                f"{lots} lot(s) risk {intent.max_risk:.0f} exceeds per-trade "
+                f"budget {budget:.0f} (VIX scale {scale:.2f}) -> reduce lots")
 
         est = cost_model.estimate_round_trip_costs(self.cfg, intent)
         if intent.max_reward > 0 and est >= 0.5 * intent.max_reward:
@@ -124,7 +131,7 @@ class RiskManager:
             True, f"PASS: {why}; risk {intent.max_risk:.0f}, reward "
                   f"{intent.max_reward:.0f}, est cost {est:.0f}, lots {lots}",
             max_risk=intent.max_risk, max_reward=intent.max_reward,
-            est_costs=est, lots=1,   # Phase 1: single lot regardless (sizing gates)
+            est_costs=est, lots=lots,
         )
 
     # ---- lifecycle updates ----

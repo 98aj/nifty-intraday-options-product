@@ -36,6 +36,11 @@ def ist_str(dt: datetime) -> str:
     return to_ist(dt).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
+def ist_str_ms(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000.0, tz=UTC).astimezone(
+        IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def parse_hhmm(s: str) -> dtime:
     h, m = s.split(":")
     return dtime(int(h), int(m))

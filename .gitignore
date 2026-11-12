@@ -18,6 +18,9 @@ venv/
 # Tokens cache
 *.token.json
 
+# User personalization (capital, lot, risk) — local, not shared
+config/user_overrides.yaml
+
 # OS / editor
 .DS_Store
 Thumbs.db

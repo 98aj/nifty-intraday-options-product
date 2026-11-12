@@ -31,39 +31,56 @@ class RegimeEngine:
         reasons = []
         bias = "NEUTRAL"
 
+        # Weighted multi-factor vote. Every factor casts its full weight toward
+        # trend and/or range, and confidence is normalised by the total weight
+        # cast (not a fixed divisor) so a genuinely strong trend can clear the
+        # confidence gate even when a single factor is neutral.
+        W_ADX, W_CHOP, W_SLOPE, W_VIX = 1.0, 1.0, 0.5, 0.5
+        total = W_ADX + W_CHOP + W_SLOPE + W_VIX  # 3.0
+
         trend_votes = 0.0
         range_votes = 0.0
-        total = 3.0
 
-        # ADX factor
+        # ADX factor: trend strength
         if adx_v >= c.adx_trend_min:
-            trend_votes += 1.0
+            trend_votes += W_ADX
             reasons.append(f"ADX {adx_v:.1f}>= {c.adx_trend_min} trend")
         else:
-            range_votes += 1.0
+            range_votes += W_ADX
             reasons.append(f"ADX {adx_v:.1f}< {c.adx_trend_min} range")
 
-        # ADX slope (rising strengthens trend conviction)
-        if adx_slope > 0 and adx_v >= c.adx_trend_min:
-            reasons.append(f"ADX slope +{adx_slope:.2f}")
-
-        # Choppiness factor
+        # Choppiness factor: a neutral reading splits its weight evenly rather
+        # than contributing nothing (the old behaviour capped confidence).
         if chop_v <= c.chop_trend_max:
-            trend_votes += 1.0
+            trend_votes += W_CHOP
             reasons.append(f"CHOP {chop_v:.1f}<= {c.chop_trend_max} trend")
         elif chop_v >= c.chop_range_min:
-            range_votes += 1.0
+            range_votes += W_CHOP
             reasons.append(f"CHOP {chop_v:.1f}>= {c.chop_range_min} range")
         else:
-            reasons.append(f"CHOP {chop_v:.1f} neutral")
+            trend_votes += W_CHOP / 2.0
+            range_votes += W_CHOP / 2.0
+            reasons.append(f"CHOP {chop_v:.1f} neutral -> split")
 
-        # VIX context factor: a spiking VIX discourages committing to trend
+        # ADX slope factor: a rising ADX confirms trend conviction. A falling
+        # ADX is ambiguous (a strong trend may simply be maturing, not fading
+        # into a range), so it splits its weight rather than voting full range.
+        if adx_slope > 0:
+            trend_votes += W_SLOPE
+            reasons.append(f"ADX slope +{adx_slope:.2f} trend")
+        else:
+            trend_votes += W_SLOPE / 2.0
+            range_votes += W_SLOPE / 2.0
+            reasons.append(f"ADX slope {adx_slope:.2f} maturing -> split")
+
+        # VIX context factor: a spiking VIX discourages committing to trend,
+        # a calm VIX actively supports it (risk-on).
         if vix >= c.vix_spike_pct:
-            range_votes += 0.5
-            total += 0.0
+            range_votes += W_VIX
             reasons.append(f"VIX {vix:.1f} elevated -> caution")
         else:
-            trend_votes += 0.0
+            trend_votes += W_VIX
+            reasons.append(f"VIX {vix:.1f} calm -> risk-on")
 
         # Decide direction bias from last bar move
         if last_close > prev_close:

@@ -37,6 +37,7 @@ class InstrumentCfg(BaseModel):
 
 class CapitalCfg(BaseModel):
     total: float = 500000
+    lots: int = 1                  # number of lots traded per position (fixed)
     max_risk_per_trade_pct: float = 1.0
     daily_max_loss_pct: float = 3.0
     daily_profit_target_pct: float = 0.0
@@ -51,7 +52,7 @@ class RegimeCfg(BaseModel):
     chop_period: int = 14
     chop_trend_max: float = 38.2
     chop_range_min: float = 61.8
-    vix_spike_pct: float = 12.0
+    vix_spike_pct: float = 17.0
     confirmations_required: int = 2
     min_dwell_bars: int = 2
     confidence_min: float = 0.55
@@ -208,6 +209,16 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge `over` into `base` (in place) and return it."""
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
 def load_config(path: str | os.PathLike | None = None) -> Config:
     root = _project_root()
     load_dotenv(root / ".env")
@@ -216,6 +227,13 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     raw: dict = {}
     if cfg_path.exists():
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+
+    # User personalization overlay (written by the dashboard settings panel).
+    # Kept in a separate file so the documented config.yaml stays pristine.
+    overrides_path = root / "config" / "user_overrides.yaml"
+    if overrides_path.exists():
+        ov = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
+        deep_merge(raw, ov)
 
     secrets = Secrets(
         upstox_api_key=os.getenv("UPSTOX_API_KEY") or None,
@@ -228,6 +246,15 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     )
     raw["secrets"] = secrets.model_dump()
     cfg = Config(**raw)
+
+    # Optional env overrides (used by scripts/run.py --sim, and for quick testing
+    # without editing config.yaml). Accept 1/true/yes/on (case-insensitive).
+    sim_env = os.getenv("BOT_SIMULATE_FEED")
+    if sim_env is not None:
+        cfg.simulate_feed = sim_env.strip().lower() in ("1", "true", "yes", "on")
+    mode_env = os.getenv("BOT_MODE")
+    if mode_env in ("paper", "live"):
+        cfg.mode = mode_env
 
     # Ensure data dirs exist
     for d in (cfg.storage.db_dir, cfg.storage.parquet_dir,

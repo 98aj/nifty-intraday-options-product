@@ -18,7 +18,7 @@ from typing import Optional
 
 import pytz
 
-from bot.clock import build_session_window, squareoff_time
+from bot.clock import build_session_window, ist_str_ms, squareoff_time
 from bot.data.candles import CandleBuilder
 from bot.execution.base import ExecutorBase
 from bot.execution.pnl import gross_pnl, unrealized_pnl
@@ -77,6 +77,10 @@ class InstrumentWorker:
     def attach_tick_sub(self, sub) -> None:
         self._tick_sub = sub
 
+    def set_executor(self, executor) -> None:
+        """Hot-swap the executor (paper <-> live) from the control loop."""
+        self.executor = executor
+
     def push_chain(self, snap: ChainSnapshot) -> None:
         try:
             self._chain_q.put_nowait(snap)
@@ -88,6 +92,16 @@ class InstrumentWorker:
             self.c15.add_candle(Candle(self.underlying_key, 15, b.start_ms,
                                        b.end_ms, b.open, b.high, b.low, b.close,
                                        b.volume, True))
+        # Publish an initial regime straight away so the dashboard isn't blank
+        # after a restart (otherwise it stays UNKNOWN until the first live 15m
+        # close). Computed on the warm-up bars as a prior; refined on each live
+        # 15m close. VIX may be 0 here (no tick yet) -> only affects the spike
+        # check, which self-corrects at the first live close.
+        self.state.set_path("candles_15m", self._recent(self.c15.closed))
+        decision = self.regime_engine.update(self.c15.closed, self.vix)
+        if decision is not None:
+            self.last_regime = decision
+            self.state.set_path("regime", to_jsonable(decision))
 
     # ---- control ----
     def pause(self) -> None:
@@ -225,28 +239,70 @@ class InstrumentWorker:
             self._close(snap, f"stop-loss {p.stop_loss_level:.0f}")
 
     # ---- entries ----
+    def _set_decision(self, *, kind: str = "", kind_reason: str = "",
+                      approved=None, risk_note=None, max_risk=None,
+                      max_reward=None, est_costs=None, past_cutoff: bool = False,
+                      action: str = "", trigger: str = "", iv_rank=None) -> None:
+        """Publish the live decision pipeline (regime -> strategy -> risk ->
+        action) so the dashboard can show what the bot is thinking."""
+        reg = self.last_regime
+        self.state.set_path("decision", {
+            "ts_ms": int(self.clock.now().timestamp() * 1000),
+            "trigger": trigger,
+            "regime": (reg.regime.value if reg else "UNKNOWN"),
+            "confidence": (reg.confidence if reg else 0.0),
+            "iv_rank": iv_rank,
+            "kind": kind,
+            "kind_reason": kind_reason,
+            "approved": approved,
+            "risk_note": risk_note,
+            "max_risk": max_risk,
+            "max_reward": max_reward,
+            "est_costs": est_costs,
+            "past_cutoff": past_cutoff,
+            "is_expiry": self.is_expiry,
+            "action": action,
+        })
+
     def _try_entry(self, trigger: str) -> None:
-        if self._paused.is_set() or self.risk.state.halted:
+        if self._paused.is_set():
+            self._set_decision(action="Paused — no new entries", trigger=trigger)
+            return
+        if self.risk.state.halted:
+            self._set_decision(action="Trading halted — see banner",
+                               trigger=trigger)
             return
         if self.position and self.position.open:
+            self._set_decision(kind=self.position.kind.value,
+                               action="In position — managing exit",
+                               trigger=trigger)
             return
         snap = self.chain_provider.snapshot() if self.chain_provider else None
         if snap is None or not snap.quotes:
+            self._set_decision(action="Waiting for option-chain data",
+                               trigger=trigger)
             return
         now = self.clock.now()
         past_cutoff = now.time() >= self.win.no_new_entry_after
+        iv_rank = self.iv_rank.current()
 
         ctx = StrategyContext(
             now_ms=int(now.timestamp() * 1000), chain=snap,
             candles_5m=self.c5.closed, candles_15m=self.c15.closed,
             regime=self.last_regime, is_expiry=self.is_expiry, vix=self.vix,
-            iv_rank=self.iv_rank.current(), lot_size=self.contracts.lot_size)
+            iv_rank=iv_rank, lot_size=self.contracts.lot_size,
+            num_lots=max(1, int(self.cfg.capital.lots)))
 
         kind, reason, intent = self.day_switch.build_entry(ctx)
         self.state.set_path("strategy_today", kind.value)
         if intent is None:
             self._journal("SIGNAL", kind.value, None, None,
                           f"flat: {reason}", {"trigger": trigger})
+            action = ("Standing aside — no setup" if kind == StrategyKind.FLAT
+                      else "No valid entry built this cycle")
+            self._set_decision(kind=kind.value, kind_reason=reason,
+                               past_cutoff=past_cutoff, action=action,
+                               trigger=trigger, iv_rank=iv_rank)
             return
 
         self._journal("SIGNAL", kind.value, None, None,
@@ -261,6 +317,13 @@ class InstrumentWorker:
                             {"kind": kind.value, "reason": intent.reason,
                              "approved": decision.approved,
                              "risk_note": decision.reason})
+        self._set_decision(
+            kind=kind.value, kind_reason=reason, approved=decision.approved,
+            risk_note=decision.reason, max_risk=decision.max_risk,
+            max_reward=decision.max_reward, est_costs=decision.est_costs,
+            past_cutoff=past_cutoff, trigger=trigger, iv_rank=iv_rank,
+            action=("Entry approved — opening position" if decision.approved
+                    else "Blocked by risk gate"))
         if not decision.approved:
             return
         self._open(intent, snap, now)
@@ -268,7 +331,16 @@ class InstrumentWorker:
     def _open(self, intent: OrderIntent, snap: ChainSnapshot,
               now: dt.datetime) -> None:
         ts = int(now.timestamp() * 1000)
-        pos = self.executor.open_position(intent, snap, ts)
+        try:
+            pos = self.executor.open_position(intent, snap, ts)
+        except NotImplementedError as exc:
+            # e.g. LiveExecutor in Phase 1 — halt safely, never crash the thread.
+            reason = f"execution unavailable: {exc}"
+            self.risk.halt(reason)
+            self.state.update(status=EngineStatus.HALTED.value, halted_reason=reason)
+            self._journal("ORDER", intent.kind.value, False, None, reason, {})
+            self.notify.alert(reason)
+            return
         self.position = pos
         self.risk.on_open()
         self.state.set_path("position", to_jsonable(pos))
@@ -293,6 +365,18 @@ class InstrumentWorker:
                       to_jsonable(self.position), ts_ms=ts)
         self.notify.trade(f"CLOSE {self.position.kind.value} ({reason}): "
                           f"pnl {realized:.1f}")
+        p = self.position
+        self.state.push_trade({
+            "entry_ist": ist_str_ms(p.entry_ts_ms),
+            "exit_ist": ist_str_ms(ts),
+            "kind": p.kind.value,
+            "legs": len(p.legs),
+            "entry_net": round(p.entry_net, 1),
+            "pnl": round(realized, 1),
+            "risk": round(p.max_risk, 0),
+            "reason": reason,
+        })
+        self.state.set_path("trades_today", self.risk.state.trades_today)
         self.position = None
 
     def _force_squareoff(self, reason: str) -> None:

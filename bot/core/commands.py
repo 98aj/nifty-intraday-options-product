@@ -19,6 +19,8 @@ class CommandType(str, Enum):
     KILL = "kill"
     RECORD_ON = "record_on"      # start persisting ticks + chain snapshots
     RECORD_OFF = "record_off"    # stop persisting ticks + chain (journal keeps logging)
+    MODE_PAPER = "mode_paper"    # switch execution to paper (simulated fills)
+    MODE_LIVE = "mode_live"      # switch execution to live (Phase 1: refused, safe)
 
 
 VALID_COMMANDS = {c.value for c in CommandType}

@@ -1,11 +1,14 @@
 """Cross-platform start/stop/status for the engine + dashboard.
 
-  python scripts/run.py start      # start engine + UI (background)
-  python scripts/run.py start-fg   # start engine in the foreground (Ctrl-C to stop)
+  python scripts/run.py start           # start engine + UI (background), health-check
+  python scripts/run.py start --sim     # same, but force simulated feed (no token)
+  python scripts/run.py start-fg        # run engine in the foreground (Ctrl-C to stop)
+  python scripts/run.py start-fg --sim
   python scripts/run.py stop
   python scripts/run.py status
 
-PID files live in data/state/. Uses the current Python interpreter.
+One command brings up BOTH processes. PID files live in data/state/; logs in
+data/logs/. Uses the current Python interpreter (the venv one via start.ps1).
 """
 from __future__ import annotations
 
@@ -14,12 +17,23 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from bot.config import load_config  # noqa: E402
+
 STATE = ROOT / "data" / "state"
+LOGS = ROOT / "data" / "logs"
 STATE.mkdir(parents=True, exist_ok=True)
+LOGS.mkdir(parents=True, exist_ok=True)
 PY = sys.executable
+
+CFG = load_config()
+API_URL = f"http://{CFG.api.host}:{CFG.api.port}"
+UI_URL = f"http://{CFG.ui.host}:{CFG.ui.port}"
 
 PROCS = {
     "engine": [PY, "-m", "bot.main"],
@@ -43,25 +57,66 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def start(background: bool = True) -> None:
+def _child_env(sim: bool) -> dict:
+    env = os.environ.copy()
+    # This CPU / many VMs need the compat flag; harmless with polars-lts-cpu.
+    env.setdefault("POLARS_SKIP_CPU_CHECK", "1")
+    if sim:
+        env["BOT_SIMULATE_FEED"] = "true"
+    return env
+
+
+def _http_ok(url: str, timeout: float = 2.0) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return 200 <= r.status < 500
+    except Exception:
+        return False
+
+
+def _wait_up(url: str, seconds: float = 15.0) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if _http_ok(url):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def start(background: bool = True, sim: bool = False) -> None:
+    env = _child_env(sim)
     for name, cmd in PROCS.items():
         pf = _pidfile(name)
         if pf.exists() and _alive(int(pf.read_text() or "0")):
             print(f"{name} already running (pid {pf.read_text()})")
             continue
-        creation = 0
-        if os.name == "nt":
-            creation = subprocess.CREATE_NEW_PROCESS_GROUP
-        log = open(ROOT / "data" / "logs" / f"{name}.log", "a", buffering=1)
-        p = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
-                             creationflags=creation if os.name == "nt" else 0)
+        creation = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        log = open(LOGS / f"{name}.log", "a", buffering=1)
+        p = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log,
+                             stderr=subprocess.STDOUT, env=env,
+                             creationflags=creation)
         pf.write_text(str(p.pid))
         print(f"started {name} (pid {p.pid}) -> data/logs/{name}.log")
-        time.sleep(1.0)
-    print("UI: http://127.0.0.1:8080   API: http://127.0.0.1:8081/state")
+        time.sleep(0.5)
+
+    print(f"\nmode: {'SIMULATED feed' if sim else 'config (' + ('sim' if CFG.simulate_feed else 'live') + ')'}")
+    print("waiting for services to come up ...")
+    ui_ok = _wait_up(UI_URL, 15)
+    eng_ok = _wait_up(API_URL + "/health", 15)
+    print(f"  dashboard {UI_URL}  -> {'UP' if ui_ok else 'not responding'}")
+    print(f"  state API {API_URL}/state -> {'UP' if eng_ok else 'not responding'}")
+    if not eng_ok:
+        print("  note: in live mode the engine runs continuously (idle when the "
+              "market is closed), so /health may read 'not responding' only for a "
+              "moment at startup. Check data/logs/engine.log. Use 'start --sim' to "
+              "run a simulated session any time.")
+    print("\nOpen the dashboard: " + UI_URL)
 
 
-def start_fg() -> None:
+def start_fg(sim: bool = False) -> None:
+    if sim:
+        os.environ["BOT_SIMULATE_FEED"] = "true"
+    os.environ.setdefault("POLARS_SKIP_CPU_CHECK", "1")
     from bot.main import main
     main()
 
@@ -96,9 +151,19 @@ def status() -> None:
             print(f"{name}: {'running' if _alive(pid) else 'stale'} (pid {pid})")
         else:
             print(f"{name}: stopped")
+    print(f"dashboard {UI_URL} -> {'UP' if _http_ok(UI_URL) else 'down'}")
+    print(f"state API {API_URL}/health -> {'UP' if _http_ok(API_URL + '/health') else 'down'}")
 
 
 if __name__ == "__main__":
-    action = sys.argv[1] if len(sys.argv) > 1 else "status"
-    {"start": lambda: start(True), "start-fg": start_fg,
-     "stop": stop, "status": status}.get(action, status)()
+    args = sys.argv[1:]
+    action = args[0] if args else "status"
+    sim = "--sim" in args
+    if action == "start":
+        start(True, sim)
+    elif action == "start-fg":
+        start_fg(sim)
+    elif action == "stop":
+        stop()
+    else:
+        status()

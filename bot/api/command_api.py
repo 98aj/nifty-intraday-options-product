@@ -26,7 +26,12 @@ class CommandBody(BaseModel):
     command: str
 
 
-def build_app(state: StateStore, cq: CommandQueue, token: str) -> FastAPI:
+class ConfigBody(BaseModel):
+    updates: dict
+
+
+def build_app(state: StateStore, cq: CommandQueue, token: str,
+              get_config=None, set_config=None) -> FastAPI:
     app = FastAPI(title="NIFTY bot command API", version="0.1.0")
 
     @app.get("/health")
@@ -36,6 +41,24 @@ def build_app(state: StateStore, cq: CommandQueue, token: str) -> FastAPI:
     @app.get("/state")
     def get_state():
         return state.snapshot()
+
+    @app.get("/config")
+    def read_config():
+        from bot.user_config import EDITABLE
+        values = get_config() if get_config else {}
+        return {"schema": EDITABLE, "values": values}
+
+    @app.post("/config")
+    def write_config(body: ConfigBody,
+                     authorization: Optional[str] = Header(default=None)):
+        if authorization != f"Bearer {token}":
+            raise HTTPException(status_code=401, detail="bad or missing token")
+        if set_config is None:
+            raise HTTPException(status_code=503, detail="config updates unavailable")
+        applied = set_config(body.updates or {})
+        if not applied:
+            raise HTTPException(status_code=400, detail="no valid fields to update")
+        return {"applied": applied}
 
     @app.post("/command")
     def post_command(body: CommandBody,
@@ -54,9 +77,11 @@ def build_app(state: StateStore, cq: CommandQueue, token: str) -> FastAPI:
 
 
 class CommandApiServer:
-    def __init__(self, cfg, state: StateStore, cq: CommandQueue) -> None:
+    def __init__(self, cfg, state: StateStore, cq: CommandQueue,
+                 get_config=None, set_config=None) -> None:
         self.cfg = cfg
-        self.app = build_app(state, cq, cfg.secrets.command_api_token)
+        self.app = build_app(state, cq, cfg.secrets.command_api_token,
+                             get_config=get_config, set_config=set_config)
         self._server: Optional[uvicorn.Server] = None
         self._thread: Optional[threading.Thread] = None
 

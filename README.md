@@ -47,8 +47,14 @@ rewrite.
   (the v2 backtester's format) and **Excel/CSV** export.
 - **Control + alerts:** Telegram (console fallback) and a FastAPI webhook, both accepting
   `status / pause / resume / flatten / kill`.
-- **UI:** a separate, read-only **NiceGUI** dashboard that reads `/state` and POSTs
-  commands to the webhook — it cannot touch engine internals.
+- **UI:** a separate, read-only **NiceGUI** dashboard (dark operations console) that reads
+  `/state` and POSTs commands to the webhook — it cannot touch engine internals. Shows
+  status badges, KPI tiles (P&L / NIFTY / VIX / trades / recording), a live price chart, a
+  visual regime panel, the open position with TP↔SL progress, a **today's-trades table**,
+  and a color-coded journal. Controls: pause / resume / flatten / kill (confirmed), the
+  **data-collection toggle**, a **paper⇄live execution toggle** (LIVE is safe-stubbed
+  in Phase 1), and a **Settings panel** (gear icon) to personalize capital, lot size and
+  risk limits.
 
 ---
 
@@ -121,7 +127,15 @@ Start engine **and** dashboard (background):
 .venv\Scripts\python.exe scripts\run.py start
 ```
 
-Or PowerShell: `./scripts/start.ps1` — stop with `./scripts/stop.ps1`.
+Add `--sim` to force the simulated feed regardless of config (handy for testing the full
+stack with no token, any time of day):
+
+```bash
+.venv\Scripts\python.exe scripts\run.py start --sim
+```
+
+`run.py start` health-checks both services and prints their URLs. Or PowerShell:
+`./scripts/start.ps1` (add `-Sim` for simulated feed) — stop with `./scripts/stop.ps1`.
 
 Run the engine in the **foreground** (Ctrl-C to stop):
 
@@ -148,6 +162,25 @@ trade journal always record** regardless of the toggle, so your audit trail is n
 Change the startup default with `recorder.collect_on_start` in `config.yaml`; the master
 `recorder.enabled: false` disables the recorder entirely.
 
+### Personalize settings (capital, lot, risk)
+
+Click the **gear icon** on the dashboard to edit initial capital, max risk per trade,
+daily max-loss / profit-target, max trades per day, max open positions, lot size and
+strike step. Changes **apply live** (the risk manager and strategies read them each cycle)
+and are **persisted** to `config/user_overrides.yaml`, which is merged over `config.yaml`
+on every start — so the documented `config.yaml` stays pristine and your personal values
+survive restarts. (Lot size is used in sim; in live mode it's taken from the Upstox
+contract master.) Also exposed as `GET /config` (read) and `POST /config` (bearer-token).
+
+### Execution mode (paper ⇄ live)
+
+Toggle execution mode at runtime from the dashboard ("Paper" / "Live"), Telegram, or the
+webhook. **Paper** fills orders with simulated, slippage-adjusted prices. **Live** is a
+deliberate Phase-1 safety stub: switching to it is honoured and shown, but the live
+executor raises `NotImplementedError`, so if the bot tries to enter it **halts safely
+instead of placing a half-built order** (live orders need the account's static IP + a
+daily OAuth token). Switch back to Paper to resume trading on simulated fills.
+
 ### After-hours / live window
 
 In **live** mode the engine only contacts Upstox inside the trading window (~09:00–15:30
@@ -158,7 +191,8 @@ session already stops polling the chain and shuts down at 15:30. (Sim mode runs 
 ### Commands (Telegram or webhook)
 
 Telegram: message the bot `status`, `pause`, `resume`, `flatten`, `kill`,
-`record_on`, `record_off` (only your configured chat id is honoured). Webhook:
+`record_on`, `record_off`, `mode_paper`, `mode_live` (only your configured chat id is
+honoured). Webhook:
 
 ```bash
 curl -X POST http://127.0.0.1:8081/command -H "Authorization: Bearer <COMMAND_API_TOKEN>" -H "Content-Type: application/json" -d "{\"command\":\"status\"}"

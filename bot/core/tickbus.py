@@ -38,6 +38,13 @@ class TickBus:
             self._subs.append(sub)
         return sub
 
+    def unsubscribe(self, sub: Subscriber) -> None:
+        """Remove a subscriber (e.g. at end of a trading day) so a long-lived
+        bus does not accumulate stale queues across sessions."""
+        with self._lock:
+            if sub in self._subs:
+                self._subs.remove(sub)
+
     def publish(self, tick: Tick) -> None:
         self.total_published += 1
         # snapshot subscriber list without holding lock during put
